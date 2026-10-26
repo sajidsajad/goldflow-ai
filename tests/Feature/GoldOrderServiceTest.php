@@ -249,4 +249,44 @@ class GoldOrderServiceTest extends TestCase
             GoldOrder::where('user_id', $user->id)->count()
         );
     }
+
+    public function test_it_rejects_an_invalid_amount_when_reusing_an_existing_idempotency_key(): void
+    {
+        $user = User::factory()->create();
+        $goldPrice = $this->createGoldPrice();
+        $service = app(GoldOrderService::class);
+
+        $originalOrder = $service->create(
+            $user,
+            (string) $goldPrice->id,
+            '5000.00',
+            'order-key-006'
+        );
+
+        try {
+            $service->create(
+                $user,
+                (string) $goldPrice->id,
+                '12.345',
+                'order-key-006'
+            );
+
+            $this->fail('Expected an invalid replay amount to be rejected.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('amount', $exception->errors());
+        }
+
+        $this->assertSame(
+            1,
+            GoldOrder::where('user_id', $user->id)->count()
+        );
+
+        $this->assertSame(
+            $originalOrder->id,
+            GoldOrder::where('user_id', $user->id)
+                ->where('idempotency_key', 'order-key-006')
+                ->firstOrFail()
+                ->id
+        );
+    }
 }
