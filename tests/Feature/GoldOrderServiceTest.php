@@ -179,4 +179,74 @@ class GoldOrderServiceTest extends TestCase
             GoldOrder::where('user_id', $user->id)->count()
         );
     }
+
+    public function test_it_rejects_reusing_an_idempotency_key_with_a_different_amount(): void
+    {
+        $user = User::factory()->create();
+        $goldPrice = $this->createGoldPrice();
+        $service = app(GoldOrderService::class);
+
+        $service->create(
+            $user,
+            (string) $goldPrice->id,
+            '5000.00',
+            'order-key-004'
+        );
+
+        try {
+            $service->create(
+                $user,
+                (string) $goldPrice->id,
+                '6000.00',
+                'order-key-004'
+            );
+
+            $this->fail('Expected conflicting idempotency-key reuse to be rejected.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('idempotency_key', $exception->errors());
+        }
+
+        $this->assertSame(
+            1,
+            GoldOrder::where('user_id', $user->id)->count()
+        );
+    }
+
+    public function test_it_rejects_reusing_an_idempotency_key_with_a_different_gold_price(): void
+    {
+        $user = User::factory()->create();
+        $firstGoldPrice = $this->createGoldPrice();
+        $secondGoldPrice = $this->createGoldPrice();
+        $service = app(GoldOrderService::class);
+
+        $service->create(
+            $user,
+            (string) $firstGoldPrice->id,
+            '5000.00',
+            'order-key-005'
+        );
+
+        try {
+            $service->create(
+                $user,
+                (string) $secondGoldPrice->id,
+                '5000.00',
+                'order-key-005'
+            );
+
+            $this->fail(
+                'Expected conflicting idempotency-key reuse to be rejected.'
+            );
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey(
+                'idempotency_key',
+                $exception->errors()
+            );
+        }
+
+        $this->assertSame(
+            1,
+            GoldOrder::where('user_id', $user->id)->count()
+        );
+    }
 }

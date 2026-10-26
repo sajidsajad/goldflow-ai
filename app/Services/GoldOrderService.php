@@ -17,6 +17,9 @@ class GoldOrderService
         string $amount,
         string $idempotencyKey
     ): GoldOrder {
+        // Validate and normalize the amount before any idempotency comparison.
+        $amount = $this->normalizeAmount($amount);
+
         try {
             return DB::transaction(function () use (
                 $user,
@@ -24,29 +27,21 @@ class GoldOrderService
                 $amount,
                 $idempotencyKey
             ): GoldOrder {
+                // A key identifies one logical request for this user.
                 $existingOrder = GoldOrder::query()
                     ->where('user_id', $user->id)
                     ->where('idempotency_key', $idempotencyKey)
                     ->first();
 
                 if ($existingOrder !== null) {
-                    return $existingOrder;
+                    return $this->returnMatchingOrder(
+                        $existingOrder,
+                        $goldPriceId,
+                        $amount
+                    );
                 }
 
-                if (! preg_match('/^\d{1,13}(?:\.\d{1,2})?$/', $amount)) {
-                    throw ValidationException::withMessages([
-                        'amount' => 'Amount must be a positive number with at most two decimal places.',
-                    ]);
-                }
-
-                $amount = bcadd($amount, '0', 2);
-
-                if (bccomp($amount, '0.00', 2) <= 0) {
-                    throw ValidationException::withMessages([
-                        'amount' => 'Amount must be greater than zero.',
-                    ]);
-                }
-
+                // Lock the selected price row while reading its snapshot.
                 $goldPrice = GoldPrice::query()
                     ->whereKey($goldPriceId)
                     ->lockForUpdate()
@@ -69,6 +64,7 @@ class GoldOrderService
                     ]);
                 }
 
+                // Use integer paise for the amount and price calculations.
                 $amountPaise = bcmul($amount, '100', 0);
                 $pricePaisePerGram = bcmul($pricePerGram, '100', 0);
 
@@ -90,24 +86,71 @@ class GoldOrderService
                 ]);
             }, attempts: 3);
         } catch (QueryException $exception) {
-            // MySQL error 1062: duplicate entry for a unique index.
+            // MySQL error 1062 means a unique constraint was violated.
             $mysqlErrorCode = (int) ($exception->errorInfo[1] ?? 0);
 
             if ($mysqlErrorCode !== 1062) {
                 throw $exception;
             }
 
+            // Another request may have created this order concurrently.
             $existingOrder = GoldOrder::query()
                 ->where('user_id', $user->id)
                 ->where('idempotency_key', $idempotencyKey)
                 ->first();
 
             if ($existingOrder !== null) {
-                return $existingOrder;
+                return $this->returnMatchingOrder(
+                    $existingOrder,
+                    $goldPriceId,
+                    $amount
+                );
             }
 
-            // A different unique constraint may have failed.
+            // The violated unique constraint was unrelated to this key.
             throw $exception;
         }
+    }
+
+    /**
+     * Validate that a repeated idempotency key represents the same request.
+     */
+    private function returnMatchingOrder(
+        GoldOrder $existingOrder,
+        string $goldPriceId,
+        string $amount
+    ): GoldOrder {
+        if (
+            (string) $existingOrder->gold_price_id !== $goldPriceId
+            || bccomp((string) $existingOrder->amount, $amount, 2) !== 0
+        ) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => 'This idempotency key has already been used with different purchase details.',
+            ]);
+        }
+
+        return $existingOrder;
+    }
+
+    /**
+     * Normalize a positive monetary amount to two decimal places.
+     */
+    private function normalizeAmount(string $amount): string
+    {
+        if (! preg_match('/^\d{1,13}(?:\.\d{1,2})?$/', $amount)) {
+            throw ValidationException::withMessages([
+                'amount' => 'Amount must be a positive number with at most two decimal places.',
+            ]);
+        }
+
+        $amount = bcadd($amount, '0', 2);
+
+        if (bccomp($amount, '0.00', 2) <= 0) {
+            throw ValidationException::withMessages([
+                'amount' => 'Amount must be greater than zero.',
+            ]);
+        }
+
+        return $amount;
     }
 }
